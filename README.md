@@ -8,6 +8,12 @@ Three MCP servers on one small Ubuntu server, reachable from claude.ai (also on 
 | **TradeBlocks** | [TradeBlocks](https://github.com/tradeblocks-org/tradeblocks) MCP (Docker image `romeo345/tradeblocks-mcp`): statistics, edge decay, walk-forward, Monte Carlo, stress tests on trade logs. |
 | **Admin** (optional) | Shell / file tools with sudo, so Claude can administer the server. |
 
+**Easiest:** give [`SETUP.md`](SETUP.md) to your AI assistant (attach it in claude.ai) and say "Set this up for me".
+It walks you through everything below, verifies the connectors and installs the skill.
+
+Skills in [`skills/`](skills/): `strategy-due-diligence` (pick-list due diligence: ML4T backtest, statistics,
+TradeBlocks robustness, PDF report).
+
 ## Install (phone only, ~15 min)
 
 1. Create a server at Hetzner Cloud (app or console): Ubuntu 24.04, type CX22 or larger, public IPv4.
