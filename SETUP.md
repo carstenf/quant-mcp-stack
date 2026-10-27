@@ -91,7 +91,7 @@ Troubleshooting (use the admin connector if available, else ask the user to rebu
 The skill runs a full due diligence of a stock-picking strategy from a pick list (ML4T backtest, ml4t-diagnostic
 statistics, TradeBlocks robustness, PDF report). It needs exactly the two connectors set up above.
 
-1. User opens on the phone: https://github.com/carstenf/quant-mcp-stack/raw/main/skills/strategy-due-diligence.zip
+1. User opens on the phone: https://raw.githubusercontent.com/carstenf/quant-mcp-stack/main/skills/strategy-due-diligence.zip
    -> download -> save to Files. Do **not** open/unzip it.
 2. claude.ai -> **Settings -> Capabilities -> Skills** (or claude.ai/customize/skills) -> **+** -> **Upload a skill**
    -> choose `strategy-due-diligence.zip`.

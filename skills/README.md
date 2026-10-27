@@ -10,7 +10,7 @@ Requires the **ML4T** and **TradeBlocks** connectors from this repo (see `../SET
 
 ### Install in claude.ai (works on a phone)
 
-1. Download [`strategy-due-diligence.zip`](https://github.com/carstenf/quant-mcp-stack/raw/main/skills/strategy-due-diligence.zip)
+1. Download [`strategy-due-diligence.zip`](https://raw.githubusercontent.com/carstenf/quant-mcp-stack/main/skills/strategy-due-diligence.zip)
    and save it to Files. Do not unzip it.
 2. claude.ai -> Settings -> Capabilities -> Skills (claude.ai/customize/skills) -> **+** -> Upload a skill -> pick the zip.
 3. In a chat with both connectors enabled, attach a pick list (columns week, ticker, rank) and ask for a due diligence.
