@@ -356,6 +356,37 @@ def split_stats(returns: dict, bench: pd.Series, names: list, date: str) -> dict
     return {"published_from": date, "variants": out}
 
 
+def evidence_grade(summary: dict, returns: dict, bench: pd.Series, variant: str, a) -> dict:
+    """How much the record can prove. A = verified real-money out-of-sample record that is long and significant
+    enough on its own; B = some genuine out-of-sample evidence, not yet sufficient; C = in-sample only."""
+    from ml4t.diagnostic.evaluation.stats import compute_min_trl
+    rt = "c" if a.record_type == "b" else a.record_type          # self-reported real money counts as paper
+    out = {"record_type": a.record_type, "treated_as": rt, "variant": variant, "published_from": a.published_from or None,
+           "assumed_vendor_trials": a.assumed_vendor_trials}
+    vt = summary.get("_vendor_trials_sensitivity", {}).get("by_assumed_trials", {}).get(str(a.assumed_vendor_trials), {})
+    out["psr_at_assumed_trials"] = vt.get("probability")
+    if rt == "d" or not a.published_from:
+        out.update(grade="C", reason="no verifiable out-of-sample period (unknown record or no publication date)")
+        return out
+    r = returns[variant]
+    post = r[r.index >= pd.Timestamp(a.published_from)]
+    x = (post - bench.reindex(post.index).fillna(0)).values
+    if len(x) < 60:
+        out.update(grade="C", reason=f"only {len(x)} out-of-sample days")
+        return out
+    m = compute_min_trl(x, frequency="daily")
+    p = (summary.get("_publication_split", {}).get("variants", {}).get(variant, {}).get("post") or {}) \
+        .get("vs_benchmark", {}).get("p_value")
+    out.update(oos_days=int(len(x)), min_trl_days=float(m.min_trl), oos_paired_p=p)
+    ok = (len(x) >= m.min_trl and p is not None and p < 0.05 and (out["psr_at_assumed_trials"] or 0) >= 0.95)
+    if rt == "a" and ok:
+        out.update(grade="A", reason="verified real-money out-of-sample record, long and significant enough")
+    else:
+        out.update(grade="B", reason="genuine out-of-sample evidence, but " + (
+            "paper/self-reported record" if ok else "shorter than MinTRL or not significant at the assumed trials"))
+    return out
+
+
 def warnings(summary: dict, checks: dict) -> list:
     w = []
     for k, v in summary.items():
@@ -386,7 +417,11 @@ def main():
     ap.add_argument("--published-from", default="", help="first verifiable publication date of the list (YYYY-MM-DD)")
     ap.add_argument("--delist-map", default="", help="csv asset,return of terminal delisting returns")
     ap.add_argument("--delist-return", type=float, default=0.0, help="terminal return for delisted names not in the map")
-    ap.add_argument("--vendor-trials", default="1,10,100,1000", help="assumed numbers of variants the vendor tried")
+    ap.add_argument("--vendor-trials", default="1,10,100,1000", help="grid of assumed numbers of vendor variants")
+    ap.add_argument("--assumed-vendor-trials", type=int, default=100,
+                    help="vendor variants from the intake (lists/strategies the vendor runs); unknown -> 100")
+    ap.add_argument("--record-type", default="d", choices=["a", "b", "c", "d"],
+                    help="a audited real money, b real money self-reported, c timestamped paper, d unknown/backtest")
     ap.add_argument("--extra-trials", default="", help="names of further variants already looked at (counted for DSR)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -440,7 +475,7 @@ def main():
     from ml4t.diagnostic.evaluation.stats import compute_min_trl
     m = compute_min_trl(returns[f"{best}w-net"].values - bench.values, frequency="daily")
     summary["_vendor_trials_sensitivity"] = vendor_trials(returns, bench, f"{best}w-net",
-                                                          [int(n) for n in a.vendor_trials.split(",")])
+                                                          sorted({int(n) for n in a.vendor_trials.split(",")} | {a.assumed_vendor_trials}))
     summary["_min_trl_best_net_hold"] = {"variant": f"{best}w-net", "min_trl_days": float(m.min_trl),
                                          "years": float(m.min_trl_years), "adequate": bool(m.has_adequate_sample)}
     summary["_cost_grid"] = {f"{h}w": {str(int(c)): summary.get(f"cost{int(c)}-{h}w-net" if c != a.cost_bps else f"{h}w-net", {})
@@ -451,6 +486,7 @@ def main():
         if "1w-net" in summary else {}
     if a.published_from:
         summary["_publication_split"] = split_stats(returns, bench, [f"{h}w-net" for h in holds], a.published_from)
+    summary["_evidence_grade"] = evidence_grade(summary, returns, bench, f"{best}w-net", a)
     summary["_pick_stats"] = pick_stats(px, cal, weeks, set())
     if excl:
         summary["_pick_stats_ex_theme"] = pick_stats(px, cal, weeks, excl)
@@ -462,7 +498,7 @@ def main():
     json.dump(summary, open(f"{a.out}/summary.json", "w"), indent=2, default=float)
     print(json.dumps({k: (v.get("annual_return"), v.get("sharpe_ratio"), v.get("max_drawdown"))
                       for k, v in summary.items() if not k.startswith("_")}, indent=1, default=float))
-    print(json.dumps({k: summary[k] for k in ["_holding_period_choice", "_vendor_trials_sensitivity", "_entry_delay",
+    print(json.dumps({k: summary[k] for k in ["_evidence_grade", "_holding_period_choice", "_vendor_trials_sensitivity", "_entry_delay",
                                               "_warnings"]}, indent=1, default=float))
 
 
