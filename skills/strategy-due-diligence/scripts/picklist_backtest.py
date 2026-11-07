@@ -40,6 +40,13 @@ TB_COLS = ["Date Opened", "Time Opened", "Opening Price", "Legs", "Premium", "Cl
            "Time Closed", "Avg. Closing Cost", "Reason For Close", "P/L", "No. of Contracts", "Funds at Close",
            "Margin Req.", "Strategy", "Opening Commissions + Fees", "Closing Commissions + Fees", "P/L %"]
 DELIST_GAP_BARS = 5
+RECORD_TYPES = {  # name -> (evidence class, can reach grade A)
+    "audited": ("real money, verifiable statements", True),
+    "self-reported": ("real money, vendor's own figures only - counted as vendor paper until statements are seen", False),
+    "paper-independent": ("signals recorded by an independent party (you, a colleague) as they arrived", True),
+    "paper-vendor": ("paper / model portfolio published by the vendor with timestamps", False),
+    "unknown": ("unknown or hypothetical, e.g. produced by a backtest", False),
+}
 REJECTED = [0]  # rejected engine orders of the current variant (should be 0; otherwise the tape is not as intended)
 
 
@@ -356,34 +363,43 @@ def split_stats(returns: dict, bench: pd.Series, names: list, date: str) -> dict
     return {"published_from": date, "variants": out}
 
 
-def evidence_grade(summary: dict, returns: dict, bench: pd.Series, variant: str, a) -> dict:
-    """How much the record can prove. A = verified real-money out-of-sample record that is long and significant
-    enough on its own; B = some genuine out-of-sample evidence, not yet sufficient; C = in-sample only."""
+def evidence_grade(summary: dict, returns: dict, bench: pd.Series, variant: str, a, conservative: str | None) -> dict:
+    """How much the record can prove. A = out-of-sample record nobody could filter (audited real money or
+    independently recorded signals), long and significant enough on its own; B = some genuine out-of-sample
+    evidence, not yet sufficient; C = in-sample only. Records without real fills are graded on the
+    conservative cost level."""
     from ml4t.diagnostic.evaluation.stats import compute_min_trl
-    rt = "c" if a.record_type == "b" else a.record_type          # self-reported real money counts as paper
-    out = {"record_type": a.record_type, "treated_as": rt, "variant": variant, "published_from": a.published_from or None,
-           "assumed_vendor_trials": a.assumed_vendor_trials}
+    rt = a.record_type
+    paper = rt != "audited"
+    used = conservative if (paper and conservative in returns) else variant
+    out = {"record_type": rt, "meaning": RECORD_TYPES[rt][0], "variant_used": used,
+           "cost_basis": "conservative cost level (no real fills)" if used != variant else "baseline cost",
+           "published_from": a.published_from or None, "assumed_vendor_trials": a.assumed_vendor_trials}
     vt = summary.get("_vendor_trials_sensitivity", {}).get("by_assumed_trials", {}).get(str(a.assumed_vendor_trials), {})
     out["psr_at_assumed_trials"] = vt.get("probability")
-    if rt == "d" or not a.published_from:
-        out.update(grade="C", reason="no verifiable out-of-sample period (unknown record or no publication date)")
+    if rt == "unknown" or not a.published_from:
+        out.update(grade="C", reason="no verifiable out-of-sample period (unknown record or no start date)")
         return out
-    r = returns[variant]
+    r = returns[used]
     post = r[r.index >= pd.Timestamp(a.published_from)]
-    x = (post - bench.reindex(post.index).fillna(0)).values
+    b = bench.reindex(post.index).fillna(0)
+    x = (post - b).values
     if len(x) < 60:
         out.update(grade="C", reason=f"only {len(x)} out-of-sample days")
         return out
+    from ml4t.diagnostic.evaluation import compute_paired_uncertainty
     m = compute_min_trl(x, frequency="daily")
-    p = (summary.get("_publication_split", {}).get("variants", {}).get(variant, {}).get("post") or {}) \
-        .get("vs_benchmark", {}).get("p_value")
+    p = _flat(compute_paired_uncertainty(post.values, b.values, rebalance_step=5)).get("p_value")
     out.update(oos_days=int(len(x)), min_trl_days=float(m.min_trl), oos_paired_p=p)
     ok = (len(x) >= m.min_trl and p is not None and p < 0.05 and (out["psr_at_assumed_trials"] or 0) >= 0.95)
-    if rt == "a" and ok:
-        out.update(grade="A", reason="verified real-money out-of-sample record, long and significant enough")
+    if ok and RECORD_TYPES[rt][1]:
+        out.update(grade="A", reason="unfilterable out-of-sample record, long and significant enough")
+    elif ok:
+        out.update(grade="B", reason="long and significant, but recorded/reported by the vendor - get statements "
+                                     "or an independent record")
     else:
-        out.update(grade="B", reason="genuine out-of-sample evidence, but " + (
-            "paper/self-reported record" if ok else "shorter than MinTRL or not significant at the assumed trials"))
+        out.update(grade="B", reason="genuine out-of-sample evidence, but shorter than MinTRL or not significant "
+                                     "at the assumed vendor trials")
     return out
 
 
@@ -420,8 +436,8 @@ def main():
     ap.add_argument("--vendor-trials", default="1,10,100,1000", help="grid of assumed numbers of vendor variants")
     ap.add_argument("--assumed-vendor-trials", type=int, default=100,
                     help="vendor variants from the intake (lists/strategies the vendor runs); unknown -> 100")
-    ap.add_argument("--record-type", default="d", choices=["a", "b", "c", "d"],
-                    help="a audited real money, b real money self-reported, c timestamped paper, d unknown/backtest")
+    ap.add_argument("--record-type", default="unknown", choices=list(RECORD_TYPES),
+                    help="how the track record was produced (see RECORD_TYPES)")
     ap.add_argument("--extra-trials", default="", help="names of further variants already looked at (counted for DSR)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -486,7 +502,8 @@ def main():
         if "1w-net" in summary else {}
     if a.published_from:
         summary["_publication_split"] = split_stats(returns, bench, [f"{h}w-net" for h in holds], a.published_from)
-    summary["_evidence_grade"] = evidence_grade(summary, returns, bench, f"{best}w-net", a)
+    cons = f"cost{int(max(grid))}-{best}w-net" if grid and max(grid) > a.cost_bps else None
+    summary["_evidence_grade"] = evidence_grade(summary, returns, bench, f"{best}w-net", a, cons)
     summary["_pick_stats"] = pick_stats(px, cal, weeks, set())
     if excl:
         summary["_pick_stats_ex_theme"] = pick_stats(px, cal, weeks, excl)
