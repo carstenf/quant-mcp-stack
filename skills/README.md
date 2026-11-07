@@ -2,7 +2,9 @@
 
 ## strategy-due-diligence
 
-Institutional-style due diligence of a stock-picking strategy from a weekly pick/trade list: backtest on the
+Institutional-style due diligence of a third-party stock-picking strategy from a weekly pick/trade list whose
+history may be filtered: provenance and filter checks (data gaps, publication split, unknown vendor trials,
+entry delay), survivorship-aware backtest on the
 ML4T engine, statistics with ml4t-diagnostic (bootstrap CIs, paired benchmark test, Deflated Sharpe, factor
 model), robustness with TradeBlocks (edge decay, walk-forward, Monte Carlo), PDF report.
 

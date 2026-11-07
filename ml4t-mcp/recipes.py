@@ -42,10 +42,9 @@ class TopN(Strategy):
         held = broker.get_positions()
         for a in (list(held) if isinstance(held, dict) else [getattr(p, "asset", p) for p in held]):
             if a not in w:
-                if a in data:
-                    w[a] = 0.0
-                else:
-                    broker.close_position(a)
+                # close exits with close_position (exact quantity); a target weight of 0 can be sized from the
+                # order request instead of the filled position -> "position reversal" rejections
+                broker.close_position(a)
         self.ex.execute(w, data, broker, timestamp=timestamp)
 
 res = run_backtest(px, TopN(), signals=sig, config=cfg)
