@@ -290,11 +290,13 @@ def diagnostics(returns: dict, bench: pd.Series, trial_names: list) -> dict:
     from ml4t.diagnostic.evaluation.stats import deflated_sharpe_ratio, whites_reality_check
     out = {n: stats(r, bench, full=not n.startswith(("cost", "delay"))) for n, r in returns.items()}
     trials = {k: returns[k] for k in trial_names}
-    out["_selection_adjustment"] = _flat(compute_selection_adjustment({k: v.values for k, v in trials.items()}))
+    if len(trials) > 1:
+        out["_selection_adjustment"] = _flat(compute_selection_adjustment({k: v.values for k, v in trials.items()}))
     ex = [r.values - bench.values for r in trials.values()]
     d = deflated_sharpe_ratio(ex, frequency="daily")
     out["_dsr_excess_vs_benchmark"] = {"probability": float(d.probability), "p_value": float(d.p_value),
-                                       "n_trials": int(d.n_trials), "trials": trial_names}
+                                       "n_trials": int(d.n_trials), "trials": trial_names,
+                                       "note": "n_trials = 1 -> this is the PSR (no selection among variants)" if len(trials) == 1 else ""}
     w = whites_reality_check(bench.values, np.column_stack([r.values for r in trials.values()]), bootstrap_samples=2000)
     out["_whites_reality_check"] = {"p_value": float(w["p_value"] if isinstance(w, dict) else w.p_value)}
     return out
@@ -439,6 +441,10 @@ def main():
     ap.add_argument("--record-type", default="unknown", choices=list(RECORD_TYPES),
                     help="how the track record was produced (see RECORD_TYPES)")
     ap.add_argument("--extra-trials", default="", help="names of further variants already looked at (counted for DSR)")
+    ap.add_argument("--traded-hold", type=int, default=0,
+                    help="holding period (weeks) that was fixed/traded BEFORE the results were seen (e.g. the paper-traded "
+                         "rule). It becomes the leader and the only trial: no selection -> DSR = PSR; other holds are "
+                         "robustness checks only. 0 = holds were compared and the best is taken (DSR over all holds)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     holds = [int(h) for h in a.holds.split(",") if h.strip()]
@@ -482,12 +488,14 @@ def main():
     returns = {k: v.reindex(idx).fillna(0) for k, v in returns.items()}
     bench = bench_px.pct_change().reindex(idx).fillna(0)
 
-    trial_names = [f"{h}w-net" for h in holds] + [t for t in a.extra_trials.split(",") if t.strip() in returns]
+    base_trials = [f"{a.traded_hold}w-net"] if a.traded_hold else [f"{h}w-net" for h in holds]
+    trial_names = base_trials + [t for t in a.extra_trials.split(",") if t.strip() in returns]
     summary = diagnostics(returns, bench, trial_names)
     for k, t in tos.items():
         summary[k]["turnover"] = t
     summary["_holding_period_choice"] = holding_choice(summary, holds, a.cost_bps, len(weeks))
-    best = summary["_holding_period_choice"].get("best_net_hold_weeks", holds[0])
+    best = a.traded_hold or summary["_holding_period_choice"].get("best_net_hold_weeks", holds[0])
+    summary["_holding_period_choice"]["leader"] = {"hold_weeks": best, "pre_specified": bool(a.traded_hold)}
     from ml4t.diagnostic.evaluation.stats import compute_min_trl
     m = compute_min_trl(returns[f"{best}w-net"].values - bench.values, frequency="daily")
     summary["_vendor_trials_sensitivity"] = vendor_trials(returns, bench, f"{best}w-net",
