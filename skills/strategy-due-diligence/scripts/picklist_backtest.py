@@ -297,7 +297,7 @@ def diagnostics(returns: dict, bench: pd.Series, trial_names: list) -> dict:
     out["_dsr_excess_vs_benchmark"] = {"probability": float(d.probability), "p_value": float(d.p_value),
                                        "n_trials": int(d.n_trials), "trials": trial_names,
                                        "note": "n_trials = 1 -> this is the PSR (no selection among variants)" if len(trials) == 1 else ""}
-    w = whites_reality_check(bench.values, np.column_stack([r.values for r in trials.values()]), bootstrap_samples=2000)
+    w = whites_reality_check(bench.values, np.column_stack([r.values for r in trials.values()]), bootstrap_samples=2000, random_state=42)
     out["_whites_reality_check"] = {"p_value": float(w["p_value"] if isinstance(w, dict) else w.p_value)}
     return out
 
@@ -350,6 +350,109 @@ def holding_choice(summary: dict, holds: list, cost_bps: float, n_weeks: int) ->
     best = max(ok, key=lambda h: rows[h]["net_cagr"])
     return {"assumed_cost_bps_per_side": cost_bps, "weeks_in_sample": n_weeks, "best_net_hold_weeks": best,
             "rule": "highest net CAGR among reliable holds (>= 4 full holding periods)", "by_hold": rows}
+
+
+def plateau_holds(summary: dict, holds: list, n_weeks: int, tol: float = 0.25, alt_tol: float = 0.50) -> dict:
+    """Plateau rule on the 1-D hold grid (metric: net CAGR, reliable holds only, grid order = holds order).
+
+    Stated before choosing: a hold belongs to the plateau if its net CAGR is within tol * |best| of the best;
+    regions are runs of adjacent holds; the centre is the middle actual hold of the widest region
+    (even count: the inner of the two middle holds, i.e. the one farther from a grid boundary; tie: the shorter hold).
+    Repeated with alt_tol; rule_dependent = the centre changes."""
+    vals = [(h, summary.get(f"{h}w-net", {}).get("annual_return")) for h in holds if n_weeks >= 4 * h]
+    vals = [(h, v) for h, v in vals if v is not None]
+    if len(vals) < 3:
+        return {"note": "fewer than 3 reliable holds - no neighbourhood to judge", "holds": [h for h, _ in vals]}
+    hs = [h for h, _ in vals]
+    best_h, best_v = max(vals, key=lambda x: x[1])
+
+    def run(t):
+        thr = best_v - t * abs(best_v)
+        runs, cur = [], []
+        for h, v in vals:
+            if v >= thr:
+                cur.append(h)
+            else:
+                if cur:
+                    runs.append(cur)
+                cur = []
+        if cur:
+            runs.append(cur)
+        widest = max(runs, key=lambda r: (len(r), best_h in r))
+        if len(widest) % 2:
+            centre = widest[len(widest) // 2]
+        else:
+            a_, b_ = widest[len(widest) // 2 - 1], widest[len(widest) // 2]
+            da, db = min(hs.index(a_), len(hs) - 1 - hs.index(a_)), min(hs.index(b_), len(hs) - 1 - hs.index(b_))
+            centre = a_ if (da > db or (da == db and a_ < b_)) else b_
+        return {"tolerance": t, "threshold_net_cagr": thr, "regions": runs, "widest_region": widest, "centre_hold_weeks": centre}
+    main, alt = run(tol), run(alt_tol)
+    i = hs.index(best_h)
+    lead_region = next(r for r in main["regions"] if best_h in r)
+    flags = []
+    if i in (0, len(hs) - 1):
+        flags.append("leader on grid boundary")
+    if main["widest_region"] == hs:
+        flags.append("flat grid: all reliable holds within tolerance - the hold choice matters little; centre is arbitrary")
+    if len(lead_region) <= 2:
+        flags.append(f"leader region has only {len(lead_region)} hold(s)")
+    for j in (i - 1, i + 1):
+        if 0 <= j < len(hs) and best_v - vals[j][1] > 2 * tol * abs(best_v):
+            flags.append(f"cliff next to leader ({hs[j]}w)")
+    return {"metric": "net CAGR", "best_hold_weeks": best_h, "best_net_cagr": best_v, "by_hold": dict(vals),
+            "main": main, "alt": alt, "rule_dependent": main["centre_hold_weeks"] != alt["centre_hold_weeks"],
+            "leader_region": lead_region, "flags": flags,
+            "note": "a grid winner is a lead, not a finding; compare leader vs centre with the paired test"}
+
+
+def paired_leader_centre(returns: dict, leader: str, centre: str, step: int = 5) -> dict:
+    """Paired block-bootstrap of leader minus centre (same ml4t-diagnostic function as the benchmark test).
+    Not adjusted for having selected both holds from the grid."""
+    from ml4t.diagnostic.evaluation import compute_paired_uncertainty
+    if leader == centre:
+        return {"skipped": "leader and plateau centre coincide - no second arm"}
+    out = _flat(compute_paired_uncertainty(returns[leader].values, returns[centre].values, rebalance_step=step))
+    out.update({"leader": leader, "centre": centre, "note": "not adjusted for selecting both holds from the grid"})
+    return out
+
+
+def day_dependence(r: pd.Series, bench: pd.Series) -> dict:
+    """Share of the total log return from the best 1/5/10 days, the result without them, and per-year returns."""
+    lr = np.log1p(r.values)
+    tot = float(lr.sum())
+    order = np.argsort(lr)[::-1]
+    yrs = len(r) / 252.0
+    out = {"total_return": float(np.expm1(tot)), "cagr": float(np.expm1(tot / yrs)) if yrs > 0 else None}
+    for k in (1, 5, 10):
+        top = float(lr[order[:k]].sum())
+        rest = tot - top
+        out[f"best_{k}_days"] = {"dates": [str(r.index[j].date()) for j in order[:k]],
+                                 "share_of_log_return": (top / tot) if tot else None,
+                                 "total_return_without": float(np.expm1(rest)),
+                                 "cagr_without": float(np.expm1(rest / yrs)) if yrs > 0 else None}
+    yr = pd.Series(lr, index=r.index).groupby(r.index.year).sum()
+    by = pd.Series(np.log1p(bench.values), index=bench.index).groupby(bench.index.year).sum()
+    out["by_year"] = {str(y): {"return": float(np.expm1(yr[y])), "benchmark": float(np.expm1(by.get(y, 0.0)))} for y in yr.index}
+    return out
+
+
+def min_improvement_check(summary: dict, leader: str, centre: str | None, bench_cagr: float | None, mi_pp: float | None) -> dict:
+    """Compare differences with the minimum improvement (net CAGR, percentage points) stated before looking."""
+    if mi_pp is None:
+        return {"stated": None, "note": "no minimum improvement was stated before looking (--min-improvement-pp) - report this"}
+    lc = summary.get(leader, {}).get("annual_return")
+    res = {"stated_pp": mi_pp}
+    if bench_cagr is not None and lc is not None:
+        d = (lc - bench_cagr) * 100
+        res["leader_vs_benchmark_pp"] = d
+        res["leader_vs_benchmark_meets"] = d >= mi_pp
+    if centre and centre != leader:
+        cc = summary.get(centre, {}).get("annual_return")
+        if cc is not None and lc is not None:
+            d = (lc - cc) * 100
+            res["leader_vs_centre_pp"] = d
+            res["leader_vs_centre_meets"] = d >= mi_pp
+    return res
 
 
 def split_stats(returns: dict, bench: pd.Series, names: list, date: str) -> dict:
@@ -445,6 +548,10 @@ def main():
                     help="holding period (weeks) that was fixed/traded BEFORE the results were seen (e.g. the paper-traded "
                          "rule). It becomes the leader and the only trial: no selection -> DSR = PSR; other holds are "
                          "robustness checks only. 0 = holds were compared and the best is taken (DSR over all holds)")
+    ap.add_argument("--min-improvement-pp", type=float, default=None,
+                    help="smallest net-CAGR difference (percentage points) that would matter for trading, stated BEFORE "
+                         "looking; differences below it count as no improvement")
+    ap.add_argument("--plateau-tol", type=float, default=0.25, help="plateau tolerance (share of |best net CAGR|)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     holds = [int(h) for h in a.holds.split(",") if h.strip()]
@@ -496,6 +603,16 @@ def main():
     summary["_holding_period_choice"] = holding_choice(summary, holds, a.cost_bps, len(weeks))
     best = a.traded_hold or summary["_holding_period_choice"].get("best_net_hold_weeks", holds[0])
     summary["_holding_period_choice"]["leader"] = {"hold_weeks": best, "pre_specified": bool(a.traded_hold)}
+    pla = plateau_holds(summary, holds, len(weeks), tol=a.plateau_tol, alt_tol=min(1.0, 2 * a.plateau_tol))
+    summary["_plateau_holds"] = pla
+    grid_best = pla.get("best_hold_weeks")
+    centre = pla.get("main", {}).get("centre_hold_weeks")
+    if grid_best and centre:
+        summary["_paired_leader_vs_centre"] = paired_leader_centre(returns, f"{grid_best}w-net", f"{centre}w-net")
+    summary["_day_dependence"] = day_dependence(returns[f"{best}w-net"], bench)
+    bcagr = float(np.expm1(np.log1p(bench.values).sum() / (len(bench) / 252.0)))
+    summary["_min_improvement"] = min_improvement_check(summary, f"{best}w-net", f"{centre}w-net" if centre else None,
+                                                        bcagr, a.min_improvement_pp)
     from ml4t.diagnostic.evaluation.stats import compute_min_trl
     m = compute_min_trl(returns[f"{best}w-net"].values - bench.values, frequency="daily")
     summary["_vendor_trials_sensitivity"] = vendor_trials(returns, bench, f"{best}w-net",
@@ -523,7 +640,7 @@ def main():
     json.dump(summary, open(f"{a.out}/summary.json", "w"), indent=2, default=float)
     print(json.dumps({k: (v.get("annual_return"), v.get("sharpe_ratio"), v.get("max_drawdown"))
                       for k, v in summary.items() if not k.startswith("_")}, indent=1, default=float))
-    print(json.dumps({k: summary[k] for k in ["_evidence_grade", "_holding_period_choice", "_vendor_trials_sensitivity", "_entry_delay",
+    print(json.dumps({k: summary[k] for k in ["_evidence_grade", "_holding_period_choice", "_plateau_holds", "_paired_leader_vs_centre", "_min_improvement", "_vendor_trials_sensitivity", "_entry_delay",
                                               "_warnings"]}, indent=1, default=float))
 
 
