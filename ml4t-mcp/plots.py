@@ -1,4 +1,4 @@
-"""Chart tools for the ml4t MCP server (house style /opt/skills/_shared/plotstyle.py, PNG returned as image)."""
+"""Chart tools for the ml4t MCP server (house style plotstyle.py, PNG returned as image)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 import polars as pl
 from mcp.server.fastmcp import Image
 
-STYLE_DIR = os.environ.get("ML4T_MCP_STYLE_DIR", "/opt/skills/_shared")  # plotstyle.py (house chart style)
+STYLE_DIR = os.environ.get("ML4T_MCP_STYLE_DIR") or os.path.dirname(os.path.abspath(__file__))  # plotstyle.py (house chart style); default: next to this file
 
 
 def _ps():

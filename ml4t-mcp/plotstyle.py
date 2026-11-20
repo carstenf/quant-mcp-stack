@@ -1,4 +1,4 @@
-"""Shared chart style for all skills in /opt/skills (matplotlib). Rules: STYLE.md.
+"""Shared chart style (matplotlib). Rules: STYLE.md.
 
 No fixed color per quantity. Colors are assigned by rule:
   - series take palette slots in order of first use (ps.color("anything") -> next free slot,
@@ -9,7 +9,7 @@ No fixed color per quantity. Colors are assigned by rule:
   - diverging / sequential scales for signed values / magnitudes.
 
 Usage:
-    import sys; sys.path.insert(0, "/opt/skills/_shared")
+    import sys; sys.path.insert(0, "<folder of plotstyle.py>")
     import plotstyle as ps
     ps.apply()                                  # dark (default) or ps.apply("light")
     fig, ax = ps.figure()                       # portrait, iPhone-readable
